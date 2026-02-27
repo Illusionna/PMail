@@ -4,28 +4,36 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
-	"github.com/Jinnrry/pmail/config"
-	"github.com/Jinnrry/pmail/db"
-	"github.com/Jinnrry/pmail/dto/parsemail"
-	"github.com/Jinnrry/pmail/hooks"
-	"github.com/Jinnrry/pmail/hooks/framework"
-	"github.com/Jinnrry/pmail/models"
-	"github.com/Jinnrry/pmail/services/rule"
-	"github.com/Jinnrry/pmail/utils/array"
-	"github.com/Jinnrry/pmail/utils/async"
-	"github.com/Jinnrry/pmail/utils/context"
-	"github.com/Jinnrry/pmail/utils/errors"
-	"github.com/Jinnrry/pmail/utils/send"
-	"github.com/mileusna/spf"
-	log "github.com/sirupsen/logrus"
-	"github.com/spf13/cast"
+	oerrors "errors"
 	"io"
 	"net"
 	"net/netip"
 	"strings"
 	"time"
+
+	"github.com/Jinnrry/pmail/config"
+	"github.com/Jinnrry/pmail/db"
+	"github.com/Jinnrry/pmail/dto/parsemail"
+	"github.com/Jinnrry/pmail/hooks"
+	"github.com/Jinnrry/pmail/hooks/framework"
+	"github.com/Jinnrry/pmail/listen/imap_server"
+	"github.com/Jinnrry/pmail/models"
+	"github.com/Jinnrry/pmail/services/rule"
+	"github.com/Jinnrry/pmail/utils/array"
+	"github.com/Jinnrry/pmail/utils/async"
+	"github.com/Jinnrry/pmail/utils/context"
+	"github.com/Jinnrry/pmail/utils/send"
+	"github.com/mileusna/spf"
+	log "github.com/sirupsen/logrus"
+	"github.com/spf13/cast"
 	. "xorm.io/builder"
 )
+
+// DropUnknownRecipientEmails 是代码级别的功能开关
+// 当设置为 true 时，发给不存在用户的邮件将被直接丢弃，不会保存到数据库
+// 这可以有效防止扫描器产生的垃圾邮件被存入第一个用户（管理员）的邮箱
+// 注意：此开关只能通过修改代码来更改，不暴露给用户配置
+const DropUnknownRecipientEmails = true
 
 func (s *Session) Data(r io.Reader) error {
 
@@ -68,7 +76,7 @@ func (s *Session) Data(r io.Reader) error {
 	if s.Ctx.UserID > 0 {
 		account, _ := email.From.GetDomainAccount()
 		if account != ctx.UserAccount && !ctx.IsAdmin {
-			return errors.New("No Auth")
+			return oerrors.New("No Auth")
 		}
 
 		log.WithContext(ctx).Debugf("开始执行插件SendBefore！")
@@ -85,7 +93,7 @@ func (s *Session) Data(r io.Reader) error {
 		}
 
 		// 转发
-		_, err := saveEmail(ctx, len(emailData), email, s.Ctx.UserID, 1, nil, true, true)
+		_, _, err := saveEmail(ctx, len(emailData), email, s.Ctx.UserID, 1, nil, true, true)
 		if err != nil {
 			log.WithContext(ctx).Errorf("Email Save Error %v", err)
 		}
@@ -135,7 +143,7 @@ func (s *Session) Data(r io.Reader) error {
 		var dkimStatus, SPFStatus bool
 
 		// DKIM校验
-		dkimStatus = parsemail.Check(bytes.NewReader(emailData))
+		dkimStatus = parsemail.Check(ctx, bytes.NewReader(emailData))
 
 		SPFStatus = spfCheck(s.RemoteAddress.String(), email.Sender, email.Sender.EmailAddress)
 
@@ -148,18 +156,14 @@ func (s *Session) Data(r io.Reader) error {
 		}
 		log.WithContext(ctx).Debugf("开始执行插件ReceiveParseAfter！End")
 
-		// 垃圾过滤
-		if config.Instance.SpamFilterLevel == 1 && !SPFStatus && !dkimStatus {
-			log.WithContext(ctx).Infoln("垃圾邮件，拒信")
-			return nil
+		_, formDomain := email.From.GetDomainAccount()
+		// 伪造邮件
+		if array.InArray(formDomain, config.Instance.Domains) && SPFStatus == false {
+			dkimStatus = false
+			email.Status = 3
 		}
 
-		if config.Instance.SpamFilterLevel == 2 && !SPFStatus {
-			log.WithContext(ctx).Infoln("垃圾邮件，拒信")
-			return nil
-		}
-
-		users, _ := saveEmail(ctx, len(emailData), email, 0, 0, s.To, SPFStatus, dkimStatus)
+		users, dbEmail, _ := saveEmail(ctx, len(emailData), email, 0, 0, s.To, SPFStatus, dkimStatus)
 
 		if email.MessageId > 0 {
 			log.WithContext(ctx).Debugf("开始执行邮件规则！")
@@ -192,12 +196,17 @@ func (s *Session) Data(r io.Reader) error {
 		as3.Wait()
 		log.WithContext(ctx).Debugf("开始执行插件ReceiveSaveAfter！End")
 
+		// IDLE命令通知
+		for _, user := range users {
+			imap_server.IdleNotice(ctx, user.ID, dbEmail)
+		}
+
 	}
 
 	return nil
 }
 
-func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserID int, emailType int, reallyTo []string, SPFStatus, dkimStatus bool) ([]*models.User, error) {
+func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserID int, emailType int, reallyTo []string, SPFStatus, dkimStatus bool) ([]*models.User, *models.Email, error) {
 	var dkimV, spfV int8
 	if dkimStatus {
 		dkimV = 1
@@ -209,7 +218,7 @@ func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserI
 	log.WithContext(ctx).Debugf("开始入库！")
 
 	if email == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	modelEmail := models.Email{
@@ -258,7 +267,7 @@ func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserI
 				if account != nil {
 					acc, domain := account.GetDomainAccount()
 					if array.InArray(domain, config.Instance.Domains) && acc != "" {
-						accounts = append(accounts, acc)
+						accounts = append(accounts, strings.ToLower(acc))
 					}
 				}
 			}
@@ -266,12 +275,16 @@ func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserI
 			for _, user := range append(append(email.To, email.Cc...), email.Bcc...) {
 				account, _ := user.GetDomainAccount()
 				if account != "" {
-					accounts = append(accounts, account)
+					accounts = append(accounts, strings.ToLower(account))
 				}
 			}
 		}
 
-		where, params, _ := ToSQL(In("account", accounts))
+		/** 这里会导致索引失效，可以尝试对lower结果加索引
+		PostgreSQL: CREATE INDEX idx_user_account_lower ON "user" (LOWER(account));
+		MySQL8+: ALTER TABLE user ADD INDEX ((LOWER(account)));
+		*/
+		where, params, _ := ToSQL(In("LOWER(account)", accounts))
 
 		err = db.Instance.Table(&models.User{}).Where(where, params...).Find(&users)
 		if err != nil {
@@ -287,8 +300,29 @@ func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserI
 				}
 			}
 		} else {
+			// 找不到收件人
+			// 如果启用了保护功能，且 验证失败，则丢弃邮件
+			// 验证通过的邮件即使收件人不存在也应交给管理员，避免误丢弃合法邮件
+
+			// 垃圾过滤
+			if DropUnknownRecipientEmails &&
+				((config.Instance.SpamFilterLevel == 1 && !SPFStatus && !dkimStatus) ||
+					(config.Instance.SpamFilterLevel == 2 && !SPFStatus) ||
+					(config.Instance.SpamFilterLevel == 3 && !dkimStatus)) {
+				log.WithContext(ctx).Infoln("垃圾邮件，拒信")
+				// 直接删除已插入的邮件记录，不关联任何用户
+				log.WithContext(ctx).Infof("收件人不存在且DKIM验证失败，丢弃邮件: %s -> %v", email.From.EmailAddress, accounts)
+				_, delErr := db.Instance.Delete(&models.Email{Id: modelEmail.Id})
+				if delErr != nil {
+					log.WithContext(ctx).Errorf("db delete error:%+v", delErr.Error())
+				}
+				return nil, nil, nil
+			}
+
+			// DKIM 验证通过或未启用保护功能时，邮件丢给管理员账号
+			log.WithContext(ctx).Infof("收件人不存在但DKIM验证通过，转交管理员: %s -> %v", email.From.EmailAddress, accounts)
+
 			err = db.Instance.Table(&models.User{}).Where("is_admin=1").Find(&users)
-			// 当邮件找不到收件人的时候，邮件全部丢给管理员账号
 			for _, user := range users {
 				ue := models.UserEmail{EmailID: modelEmail.Id, UserID: user.ID, Status: cast.ToInt8(email.Status)}
 				_, err = db.Instance.Insert(&ue)
@@ -305,7 +339,7 @@ func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserI
 		}
 	}
 
-	return users, nil
+	return users, &modelEmail, nil
 }
 
 func json2string(d any) string {

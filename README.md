@@ -57,10 +57,10 @@ First go to [spamhaus](https://check.spamhaus.org/) and check your domain name a
 
 Or
 
-`docker run -p 25:25 -p 80:80 -p 443:443 -p 110:110 -p 465:465 -p 995:995 -v $(pwd)/config:/work/config ghcr.io/jinnrry/pmail:latest`
+`docker run -p 25:25 -p 80:80 -p 443:443 -p 110:110 -p 465:465 -p 587:587 -p 995:995 -p 993:993 -v $(pwd)/config:/work/config ghcr.io/jinnrry/pmail:latest`
 
 > [!IMPORTANT]
-> If your server has a firewall turned on, you need to open ports 25, 80, 110, 443, 465, 995
+> If your server has a firewall turned on, you need to open ports 25, 80, 110, 443, 465,587, 993, 995
 
 ## 3、Configuration
 
@@ -75,7 +75,7 @@ use [https://www.mail-tester.com/](https://www.mail-tester.com/) for checking.
 
 # Configuration file format description
 
-```json
+```jsonc
 {
   "logLevel": "info", //log output level
   "domain": "domain.com", // Your domain
@@ -89,7 +89,7 @@ use [https://www.mail-tester.com/](https://www.mail-tester.com/) for checking.
   "httpsEnabled": 0, // enabled https , 0:enabled 1:enablde 2:disenabled
   "httpPort": 80, // http port . default 80
   "httpsPort": 443, // https port . default 443
-  "spamFilterLevel": 0,// Spam filter level, 0: no filter, 1: filtering when `spf` and `dkim` don't pass, 2: filtering when `spf` don't pass
+  "spamFilterLevel": 0,// Spam Filtering Levels: 0: No filtering. 1: Filter when both SPF and DKIM fail (in the absence of valid recipient filtering). 2: Filter when SPF check fails (in the absence of valid recipient filtering).  3: Filter when DKIM check fails (in the absence of valid recipient filtering)
   "isInit": true // If false, it will enter the bootstrap process.
 }
 ```
@@ -102,15 +102,20 @@ POP3 Port: 110/995(SSL)
 
 SMTP Server Address : smtp.[Your Domain]
 
-SMTP Port: 25/465(SSL)
+SMTP Port: 25/465、587(SSL)
 
+IMAP Server Address : imap.[Your Domain]
+
+IMAP Port: 993(SSL)
 # Plugin
 
 [WeChat Push](server/hooks/wechat_push/README.md)
 
-[Telegram Push](server/hooks/telegram_push/README.md)
+[Spam Block](server/hooks/spam_block/README.md)
 
-[Web Push](server/hooks/web_push/README.md)
+# Community plugins
+
+[Telegram Push](https://github.com/ydzydzydz/pmail_telegram_push)
 
 ## Plugin Install
 > [!IMPORTANT]
@@ -146,6 +151,4 @@ The code is in `server` folder.
 
 [go to wiki](https://github.com/Jinnrry/PMail/wiki/%E6%8F%92%E4%BB%B6%E5%BC%80%E5%8F%91%E8%AF%B4%E6%98%8E)
 
-# Thanks
 
-A special thanks to [Jetbrains](http://jetbrains.com/) for donating licenses to the project.

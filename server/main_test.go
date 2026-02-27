@@ -1,13 +1,15 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/Jinnrry/pmail/config"
 	"github.com/Jinnrry/pmail/db"
 	"github.com/Jinnrry/pmail/dto/response"
 	"github.com/Jinnrry/pmail/models"
-	"github.com/Jinnrry/pmail/services/setup"
 	"github.com/Jinnrry/pmail/signal"
 	"github.com/Jinnrry/pmail/utils/array"
 	"github.com/spf13/cast"
@@ -37,10 +39,12 @@ func TestMain(m *testing.M) {
 	httpClient = &http.Client{Jar: cookeieJar, Timeout: 5 * time.Minute}
 	os.Remove("config/config.json")
 	os.Remove("config/pmail_temp.db")
+	os.Setenv("setup_port", cast.ToString(TestPort))
+
 	go func() {
 		main()
 	}()
-	time.Sleep(3 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	m.Run()
 
@@ -54,28 +58,32 @@ func TestMaster(t *testing.T) {
 	t.Run("testPwdSet", testPwdSet)
 	t.Run("testDomainSet", testDomainSet)
 	t.Run("testDNSSet", testDNSSet)
-	cfg, err := setup.ReadConfig()
+	cfg, err := config.ReadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.HttpsEnabled = 2
 	cfg.HttpPort = TestPort
-	err = setup.WriteConfig(cfg)
+	cfg.LogLevel = "debug"
+	err = config.WriteConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Run("testSSLSet", testSSLSet)
+	t.Logf("Stop 8 Second for wating restart")
 	time.Sleep(8 * time.Second)
 	t.Run("testLogin", testLogin)           // 登录管理员账号
 	t.Run("testCreateUser", testCreateUser) // 创建3个测试用户
 	t.Run("testEditUser", testEditUser)     // 编辑user2，封禁user3
 	t.Run("testSendEmail", testSendEmail)
+	t.Logf("Stop 8 Second for wating sending")
 	time.Sleep(8 * time.Second)
 	t.Run("testEmailList", testEmailList)
 	t.Run("testGetDetail", testGetEmailDetail)
 	t.Run("testDelEmail", testDelEmail)
 
 	t.Run("testSendEmail2User1", testSendEmail2User1)
+	t.Run("testSendEmail2User12", testSendEmail2User12)
 	t.Run("testSendEmail2User2", testSendEmail2User2)
 	t.Run("testSendEmail2User3", testSendEmail2User3)
 	time.Sleep(8 * time.Second)
@@ -85,6 +93,8 @@ func TestMaster(t *testing.T) {
 	t.Run("testLoginUser2", testLoginUser2) // 测试登录普通账号
 
 	t.Run("testUser2EmailList", testUser2EmailList)
+
+	t.Run("testUser2DelEmail", testUser2DelEmail) // 删除2个人共同拥有的邮件
 
 	// 创建group
 	t.Run("testCreateGroup", testCreateGroup)
@@ -99,9 +109,61 @@ func TestMaster(t *testing.T) {
 	t.Run("testMoverEmailSend", testSendEmail2User2ForSpam)
 	time.Sleep(3 * time.Second)
 
+	// 生成10封测试邮件
+	t.Run("genTestEmailData", genTestEmailData)
+	time.Sleep(3 * time.Second)
+
 	// 检查规则执行
 	t.Run("testCheckRule", testCheckRule)
 	time.Sleep(3 * time.Second)
+
+	t.Run("testTokenLogin", testTokenLogin)
+}
+
+func md5Encode(str string) string {
+	h := md5.New()
+	h.Write([]byte(str))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func genToken(account, password string) string {
+	now := cast.ToString(time.Now().Unix())
+	return fmt.Sprintf("%s:%s:%s", account, md5Encode(md5Encode(md5Encode(password+"pmail")+"pmail2023")+now), now)
+}
+
+func testTokenLogin(t *testing.T) {
+
+	req, _ := http.NewRequest("POST", TestHost+"/api/email/list", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Token", genToken("testCase", "testCase"))
+
+	ret, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Error(err)
+	}
+	data, err := readResponse(ret.Body)
+	if err != nil {
+		t.Error(err)
+	}
+	if data.ErrorNo != 0 {
+		t.Error("Get Email List Api Error!")
+		t.Errorf("%+v", data)
+	}
+	dt := data.Data.(map[string]interface{})
+	if dt["list"] == nil || len(dt["list"].([]interface{})) == 0 {
+		t.Error("Email List Is Empty!")
+		return
+	}
+
+	lst := dt["list"].([]interface{})
+	item := lst[0].(map[string]interface{})
+	id := cast.ToInt(item["id"])
+	if id == 0 {
+		t.Error("Email List Data Error!")
+	}
+
+	t.Logf("testTokenLogin Success! Response: %+v", data)
+
 }
 
 func testCheckRule(t *testing.T) {
@@ -193,8 +255,8 @@ func testCreateGroup(t *testing.T) {
 		t.Error("CreateGroup Api Error!", data)
 	}
 	dt := data.Data.([]any)
-	if len(dt) != 1 {
-		t.Error("Group List Is Empty!")
+	if len(dt) != 4 {
+		t.Errorf("Group List Check Error!,response: %+v", data)
 	}
 }
 
@@ -287,8 +349,10 @@ func testCreateUser(t *testing.T) {
 func testPort(t *testing.T) {
 	if !portCheck(TestPort) {
 		t.Error("port check failed")
+	} else {
+		t.Log("port check passed")
 	}
-	t.Log("port check passed")
+
 }
 
 func testDataBaseSet(t *testing.T) {
@@ -303,7 +367,9 @@ func testDataBaseSet(t *testing.T) {
 		t.Error(err)
 	}
 	if data.ErrorNo != 0 {
+		t.Errorf("Response %+v", data)
 		t.Error("Get Database Config Api Error!")
+		return
 	}
 
 	argList := flag.Args()
@@ -318,7 +384,7 @@ func testDataBaseSet(t *testing.T) {
 `
 	} else if array.InArray("postgres", argList) {
 		configData = `
-{"action":"set","step":"database","db_type":"postgres","db_dsn":"postgres://postgres:githubTest@127.0.0.1:5432/pmail?sslmode=disable"}
+{"action":"set","step":"database","db_type":"postgres","db_dsn":"postgres://postgres:githubTest@postgres:5432/pmail?sslmode=disable"}
 `
 	}
 
@@ -658,6 +724,85 @@ func testSendEmail2User2ForMove(t *testing.T) {
 
 }
 
+func genTestEmailData(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		ret, err := httpClient.Post(TestHost+"/api/email/send", "application/json", strings.NewReader(fmt.Sprintf(
+			`
+		{
+    "from": {
+        "name": "user2",
+        "email": "user2@test.domain"
+    },
+    "to": [
+        {
+            "name": "admin",
+            "email": "admin@test.domain"
+        }
+    ],
+    "cc": [
+        
+    ],
+    "subject": "测试邮件%d",
+    "text": "测试邮件%d",
+    "html": "<div>测试邮件%d</div>"
+}
+
+`, i, i, i)))
+		if err != nil {
+			t.Error(err)
+		}
+		data, err := readResponse(ret.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		if data.ErrorNo != 0 {
+			t.Error("Send Email Api Error!")
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+}
+
+func testSendEmail2User12(t *testing.T) {
+	ret, err := httpClient.Post(TestHost+"/api/email/send", "application/json", strings.NewReader(`
+		{
+    "from": {
+        "name": "i",
+        "email": "i@test.domain"
+    },
+    "to": [
+        {
+            "name": "y",
+            "email": "user1@test.domain"
+        },
+		{
+            "name": "y2",
+            "email": "user2@test.domain"
+        }
+    ],
+    "cc": [
+        
+    ],
+    "subject": "HelloUser1User2",
+    "text": "HelloUser1User2",
+    "html": "<div>HelloUser1User2</div>"
+}
+
+`))
+	if err != nil {
+		t.Error(err)
+	}
+	data, err := readResponse(ret.Body)
+	if err != nil {
+		t.Error(err)
+	}
+	if data.ErrorNo != 0 {
+		t.Error("Send Email Api Error!")
+	}
+
+	t.Logf("testSendEmail2User1 Success! Response: %+v", data)
+}
+
 func testSendEmail2User1(t *testing.T) {
 	ret, err := httpClient.Post(TestHost+"/api/email/send", "application/json", strings.NewReader(`
 		{
@@ -809,7 +954,7 @@ func testUser2EmailList(t *testing.T) {
 	}
 	dt := data.Data.(map[string]interface{})
 
-	if dt["list"] == nil || len(dt["list"].([]interface{})) != 1 {
+	if dt["list"] == nil || len(dt["list"].([]interface{})) != 2 {
 		t.Error("Email List Is Empty!")
 	}
 
@@ -854,6 +999,60 @@ func testDelEmail(t *testing.T) {
 	db.Instance.Where("email_id = ?", id).Get(&mail)
 	if mail.Status != 3 {
 		t.Error("Email Delete Api Error!")
+	}
+
+	t.Logf("testDelEmail Success! Response: %+v", data)
+}
+
+func testUser2DelEmail(t *testing.T) {
+	ret, err := httpClient.Post(TestHost+"/api/email/list", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Error(err)
+	}
+	data, err := readResponse(ret.Body)
+	if err != nil {
+		t.Error(err)
+	}
+	if data.ErrorNo != 0 {
+		t.Error("Get Email List Api Error!")
+	}
+	dt := data.Data.(map[string]interface{})
+	if len(dt["list"].([]interface{})) == 0 {
+		t.Error("Email List Is Empty!")
+	}
+	lst := dt["list"].([]interface{})
+
+	for _, item := range lst {
+		// 删除两个用户的邮件
+		title := cast.ToString(item.(map[string]interface{})["title"])
+		id := cast.ToInt(item.(map[string]interface{})["id"])
+		if title == "HelloUser1User2" {
+			ret, err = httpClient.Post(TestHost+"/api/email/del", "application/json", strings.NewReader(fmt.Sprintf(`{
+	"ids":[%d]	
+}`, id)))
+			if err != nil {
+				t.Error(err)
+			}
+			data, err = readResponse(ret.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			if data.ErrorNo != 0 {
+				t.Error("Email Delete Api Error!")
+			}
+			var mails []models.UserEmail
+			db.Instance.Where("email_id = ?", id).Find(&mails)
+			for _, mail := range mails {
+				if mail.Status != 3 && mail.UserID == 3 {
+					t.Error("Email Delete Api Error!")
+				}
+				if mail.UserID != 3 && mail.Status == 3 {
+					t.Error("Email Delete Api Error!")
+				}
+			}
+
+		}
+
 	}
 
 	t.Logf("testDelEmail Success! Response: %+v", data)

@@ -13,12 +13,12 @@
         <el-button size="small">
           {{ lang.move_btn }}
           <el-icon class="el-icon--right">
-            <EpArrowDownBold />
+            <EpArrowDownBold/>
           </el-icon>
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item @click="move(group.id)" v-for="group in groupList" :key="group.id">{{
+            <el-dropdown-item @click="move(group.id,group.name)" v-for="group in groupList" :key="group.id">{{
                 group.name
               }}
             </el-dropdown-item>
@@ -27,27 +27,27 @@
       </el-dropdown>
     </div>
     <div id="table">
-      <el-table ref="taskTableDataRef" :data="data" :show-header="true"
-                :border="false" @row-click="rowClick" :row-style="rowStyle">
+      <el-table ref="taskTableDataRef" :data="data" :show-header="true" :border="false" @row-click="rowClick"
+                :row-style="rowStyle">
         <el-table-column type="selection" width="30"/>
         <el-table-column prop="is_read" label="" width="50">
           <template #default="scope">
             <div>
-                            <span v-if="!scope.row.is_read">
-                                {{ lang.new }}
-                            </span>
+              <span v-if="!scope.row.is_read">
+                {{ lang.new }}
+              </span>
               <span style="font-weight: 900;color: #FF0000;" v-if="scope.row.dangerous">
-                                <el-tooltip effect="dark" :content="lang.dangerous" placement="top-start">
-                                    !
-                                </el-tooltip>
+                <el-tooltip effect="dark" :content="lang.dangerous" placement="top-start">
+                  !
+                </el-tooltip>
 
-                            </span>
+              </span>
               <span style="font-weight: 900;color: #FF0000;" v-if="scope.row.error !== ''">
-                                <el-tooltip effect="dark" :content="scope.row.error" placement="top-start">
-                                    !
-                                </el-tooltip>
+                <el-tooltip effect="dark" :content="scope.row.error" placement="top-start">
+                  !
+                </el-tooltip>
 
-                            </span>
+              </span>
             </div>
           </template>
         </el-table-column>
@@ -63,8 +63,8 @@
 
         <el-table-column prop="title" :label="lang.to" width="150">
           <template #default="scope">
-            <el-tooltip v-for="toInfo in scope.row.to" :key="toInfo" class="box-item" effect="dark" :content="toInfo.EmailAddress"
-                        placement="top">
+            <el-tooltip v-for="toInfo in scope.row.to" :key="toInfo" class="box-item" effect="dark"
+                        :content="toInfo.EmailAddress" placement="top">
               <el-tag size="small" type="info">{{ toInfo.Name !== '' ? toInfo.Name : toInfo.EmailAddress }}</el-tag>
             </el-tooltip>
           </template>
@@ -158,54 +158,66 @@ const markRead = function () {
   rows.forEach(element => {
     ids.push(element.id)
   });
-
-  http.post("/api/email/read", {"ids": ids}).then(res => {
-    if (res.errorNo === 0) {
-      updateList()
-    } else {
-      ElMessage({
-        type: 'error',
-        message: res.errorMsg,
-      })
-    }
-  })
+  if (ids.length == 0) {
+    ElMessageBox.alert('Unselected content', 'Notice', {
+      confirmButtonText: 'OK',
+    })
+  } else {
+    http.post("/api/email/read", {"ids": ids}).then(res => {
+      if (res.errorNo === 0) {
+        updateList()
+      } else {
+        ElMessage({
+          type: 'error',
+          message: res.errorMsg,
+        })
+      }
+    })
+  }
 }
 
 
-const move = function (group_id) {
+const move = function (group_id, group_name) {
   let rows = taskTableDataRef.value?.getSelectionRows()
   let ids = []
   rows.forEach(element => {
     ids.push(element.id)
   });
 
-  ElMessageBox.confirm(
-      lang.move_email_confirm,
-      'Warning',
-      {
-        confirmButtonText: 'OK',
-        cancelButtonText: 'Cancel',
-        type: 'warning',
-      }
-  )
-      .then(() => {
-        http.post("/api/email/move", {"group_id": group_id, "ids": ids}).then(res => {
-          if (res.errorNo === 0) {
-            updateList()
-            ElMessage({
-              type: 'success',
-              message: 'Move completed',
-            })
-          } else {
-            ElMessage({
-              type: 'error',
-              message: res.errorMsg,
-            })
-          }
+
+  if (ids.length == 0) {
+    ElMessageBox.alert('Unselected content', 'Notice', {
+      confirmButtonText: 'OK',
+    })
+  } else {
+    ElMessageBox.confirm(
+        lang.move_email_confirm,
+        'Warning',
+        {
+          confirmButtonText: 'OK',
+          cancelButtonText: 'Cancel',
+          type: 'warning',
+        }
+    )
+        .then(() => {
+          http.post("/api/email/move", {"group_id": group_id, "group_name": group_name, "ids": ids}).then(res => {
+            if (res.errorNo === 0) {
+              updateList()
+              ElMessage({
+                type: 'success',
+                message: 'Move completed',
+              })
+            } else {
+              ElMessage({
+                type: 'error',
+                message: res.errorMsg,
+              })
+            }
+          })
+
+
         })
-
-
-      })
+  }
 }
 
 
@@ -217,35 +229,40 @@ const del = function () {
   });
 
   let groupTag = JSON.parse(tag)
+  if (ids.length == 0) {
+    ElMessageBox.alert('Unselected content', 'Notice', {
+      confirmButtonText: 'OK',
+    })
+  } else {
+
+    ElMessageBox.confirm(
+        lang.del_email_confirm,
+        'Warning',
+        {
+          confirmButtonText: 'OK',
+          cancelButtonText: 'Cancel',
+          type: 'warning',
+        }
+    )
+        .then(() => {
+          http.post("/api/email/del", {"ids": ids, "forcedDel": groupTag.status === 3}).then(res => {
+            if (res.errorNo === 0) {
+              updateList()
+              ElMessage({
+                type: 'success',
+                message: 'Delete completed',
+              })
+            } else {
+              ElMessage({
+                type: 'error',
+                message: res.errorMsg,
+              })
+            }
+          })
 
 
-  ElMessageBox.confirm(
-      lang.del_email_confirm,
-      'Warning',
-      {
-        confirmButtonText: 'OK',
-        cancelButtonText: 'Cancel',
-        type: 'warning',
-      }
-  )
-      .then(() => {
-        http.post("/api/email/del", {"ids": ids, "forcedDel": groupTag.status === 3}).then(res => {
-          if (res.errorNo === 0) {
-            updateList()
-            ElMessage({
-              type: 'success',
-              message: 'Delete completed',
-            })
-          } else {
-            ElMessage({
-              type: 'error',
-              message: res.errorMsg,
-            })
-          }
         })
-
-
-      })
+  }
 }
 
 
